@@ -42,22 +42,25 @@ wss.on('connection', (clientWs) => {
       const msg = JSON.parse(rawData.toString());
       const alt = msg.channel?.alternatives?.[0];
       if (!alt) return;
-
+  
+      // console.log("Deepgram message =>", msg);
+      // console.log("Deepgram alt =>", alt);
+  
       // partial
-      if (alt.transcript && !alt.is_final) {
-        // forward partial to client so user sees real-time text
+      if (alt.transcript && !msg.is_final) {
         clientWs.send(JSON.stringify({ transcript: alt.transcript, is_final: false }));
       }
+  
       // final
-      if (alt.transcript && alt.is_final) {
+      if (alt.transcript && msg.is_final) {
         clientWs.send(JSON.stringify({ transcript: alt.transcript, is_final: true }));
-        // => Now pass to agent
         onFinalTranscript(alt.transcript);
       }
-    } catch(err) {
+    } catch (err) {
       console.error('Deepgram parse error:', err);
     }
   });
+  
 
   dgSocket.on('close', () => console.log('Deepgram WS closed.'));
   dgSocket.on('error', (err) => console.error('DG WS error:', err));

@@ -56,7 +56,7 @@ If they only want info or a chat, reply in text.
 
   try {
     const resp = await openai.createChatCompletion({
-      model: "gpt-3.5-turbo-0613",  // or "gpt-4-0613"
+      model: "gpt-3.5-turbo",  // or "gpt-4-0613"
       messages,
       functions: HOME_FUNCTIONS,
       function_call: "auto",
