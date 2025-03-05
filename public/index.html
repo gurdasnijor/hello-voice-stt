@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Hello Voice STT</title>
+    <style>
+      body { font-family: sans-serif; }
+      #logs { white-space: pre; border: 1px solid #ccc; padding: 10px; width: 400px; height: 300px; overflow-y: auto; }
+      button { margin: 10px; }
+    </style>
+  </head>
+  <body>
+    <h1>Real-time STT Demo</h1>
+    <button id="startBtn">Start</button>
+    <button id="stopBtn">Stop</button>
+    <div id="logs"></div>
+
+    <script>
+      let mediaRecorder;
+      let ws;
+      const logs = document.getElementById('logs');
+
+      function log(text) {
+        logs.textContent += text + "\n";
+        logs.scrollTop = logs.scrollHeight;
+      }
+
+      document.getElementById('startBtn').onclick = async () => {
+        try {
+          // 1) Get mic access
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          mediaRecorder = new MediaRecorder(stream);
+
+          // 3) Connect WS to server
+          ws = new WebSocket(`ws://${window.location.host}/stt`);
+          ws.binaryType = 'arraybuffer'; // we want raw chunk data
+
+          ws.onopen = () => log("WebSocket connected to /stt");
+          ws.onmessage = (event) => {
+            // transcripts from server
+            const msg = JSON.parse(event.data);
+            log(`Transcript: ${msg.transcript} (final? ${msg.is_final})`);
+          };
+          ws.onclose = () => log("WebSocket closed");
+          ws.onerror = (err) => log("WS error: " + err);
+
+          // 4) Send each recorded chunk to the server
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+              // e.data is a Blob of audio in opus format
+              e.data.arrayBuffer().then((buffer) => {
+                ws.send(buffer);
+              });
+            }
+          };
+
+          // Start recording in small chunk times
+          mediaRecorder.start(250); // send chunk ~every 250ms
+          log("Started recording & sending audio...");
+        } catch (err) {
+          log("Error starting: " + err);
+        }
+      };
+
+      document.getElementById('stopBtn').onclick = () => {
+        if (mediaRecorder && mediaRecorder.state !== "inactive") {
+          mediaRecorder.stop();
+          log("Stopped mediaRecorder");
+        }
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.close();
+          log("Closed WS");
+        }
+      };
+    </script>
+  </body>
+</html>
