@@ -1,74 +1,91 @@
 <!DOCTYPE html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Voice Agent Demo</title>
-    <style>
-      body { font-family: sans-serif; }
-      #logs { white-space: pre; border: 1px solid #ccc; width: 400px; height: 300px; overflow-y: auto; padding: 5px; }
-      button { margin: 10px; }
-    </style>
-  </head>
-  <body>
-    <h1>Voice Agent with Function Calling</h1>
-    <button id="startBtn">Start</button>
-    <button id="stopBtn">Stop</button>
-    <div id="logs"></div>
+<head>
+  <meta charset="utf-8"/>
+  <title>Deepgram + OpenAI LLM Demo</title>
+</head>
+<body>
+  <button id="startBtn">Start</button>
+  <button id="stopBtn">Stop</button>
 
-    <script>
-      let mediaRecorder, ws;
-      const logs = document.getElementById('logs');
+  <h3>Transcripts (Partial / Final):</h3>
+  <textarea id="transcriptLog" rows="10" cols="50" readonly></textarea>
 
-      function log(text) {
-        logs.textContent += text + "\n";
-        logs.scrollTop = logs.scrollHeight;
-      }
+  <h3>LLM Responses:</h3>
+  <textarea id="agentOutput" rows="10" cols="50" readonly></textarea>
 
-      document.getElementById('startBtn').onclick = async () => {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          mediaRecorder = new MediaRecorder(stream /* no explicit mimeType */);
+  <script>
+    let mediaRecorder, ws;
+    const transcriptBox = document.getElementById("transcriptLog");
+    const agentBox = document.getElementById("agentOutput");
 
-          ws = new WebSocket(`ws://${window.location.host}/stt`);
-          ws.binaryType = 'arraybuffer';
+    function appendTranscript(text) {
+      transcriptBox.value += text + "\n";
+    }
+    function appendLLMResponse(text) {
+      agentBox.value += text + "\n";
+    }
 
-          ws.onopen = () => log("WS connected to /stt");
-          ws.onmessage = (evt) => {
+    document.getElementById("startBtn").onclick = async () => {
+      try {
+        // 1) request mic
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // 2) create mediaRecorder
+        mediaRecorder = new MediaRecorder(stream);
+
+        // 3) connect to /stt
+        ws = new WebSocket(`ws://${window.location.host}/stt`);
+        ws.onopen = () => appendTranscript("WS connected /stt");
+        ws.onclose = () => appendTranscript("WS closed");
+
+        // 4) handle incoming transcripts or LLM
+        ws.onmessage = (evt) => {
+          try {
             const msg = JSON.parse(evt.data);
-            if (msg.is_final) {
-              log("Final: " + msg.transcript);
-            } else {
-              log("Partial: " + msg.transcript);
+            // partial / final transcript
+            if (msg.transcript) {
+              if (msg.is_final) {
+                appendTranscript("[Final] " + msg.transcript);
+              } else {
+                appendTranscript("[Partial] " + msg.transcript);
+              }
             }
-          };
-          ws.onclose = () => log("WS closed");
-          ws.onerror = (err) => log("WS error: " + err);
-
-          mediaRecorder.ondataavailable = (e) => {
-            if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-              e.data.arrayBuffer().then((buff) => {
-                ws.send(buff);
-              });
+            // llmResponse
+            if (msg.llmResponse) {
+              appendLLMResponse("LLM says: " + msg.llmResponse);
             }
-          };
+          } catch (err) {
+            // if we get binary data or invalid JSON
+            console.log("Got unparseable data from server:", evt.data);
+          }
+        };
 
-          mediaRecorder.start(300); // chunk every 300ms
-          log("Recording started...");
-        } catch (err) {
-          log("Error: " + err);
-        }
-      };
+        // 5) send mic chunks to server
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+            e.data.arrayBuffer().then((buff) => {
+              ws.send(buff);
+            });
+          }
+        };
 
-      document.getElementById('stopBtn').onclick = () => {
-        if (mediaRecorder && mediaRecorder.state !== "inactive") {
-          mediaRecorder.stop();
-          log("Recording stopped.");
-        }
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.close();
-          log("WebSocket closed.");
-        }
-      };
-    </script>
-  </body>
+        // chunk every 300ms
+        mediaRecorder.start(300);
+        appendTranscript("Recording started...");
+      } catch (err) {
+        appendTranscript("Error: " + err);
+      }
+    };
+
+    document.getElementById("stopBtn").onclick = () => {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+        appendTranscript("Recording stopped.");
+      }
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+    };
+  </script>
+</body>
 </html>
