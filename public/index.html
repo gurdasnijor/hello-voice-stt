@@ -2,22 +2,21 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Hello Voice STT</title>
+    <title>Voice Agent Demo</title>
     <style>
       body { font-family: sans-serif; }
-      #logs { white-space: pre; border: 1px solid #ccc; padding: 10px; width: 400px; height: 300px; overflow-y: auto; }
+      #logs { white-space: pre; border: 1px solid #ccc; width: 400px; height: 300px; overflow-y: auto; padding: 5px; }
       button { margin: 10px; }
     </style>
   </head>
   <body>
-    <h1>Real-time STT Demo</h1>
+    <h1>Voice Agent with Function Calling</h1>
     <button id="startBtn">Start</button>
     <button id="stopBtn">Stop</button>
     <div id="logs"></div>
 
     <script>
-      let mediaRecorder;
-      let ws;
+      let mediaRecorder, ws;
       const logs = document.getElementById('logs');
 
       function log(text) {
@@ -27,49 +26,47 @@
 
       document.getElementById('startBtn').onclick = async () => {
         try {
-          // 1) Get mic access
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          mediaRecorder = new MediaRecorder(stream);
+          mediaRecorder = new MediaRecorder(stream /* no explicit mimeType */);
 
-          // 3) Connect WS to server
           ws = new WebSocket(`ws://${window.location.host}/stt`);
-          ws.binaryType = 'arraybuffer'; // we want raw chunk data
+          ws.binaryType = 'arraybuffer';
 
-          ws.onopen = () => log("WebSocket connected to /stt");
-          ws.onmessage = (event) => {
-            // transcripts from server
-            const msg = JSON.parse(event.data);
-            log(`Transcript: ${msg.transcript} (final? ${msg.is_final})`);
+          ws.onopen = () => log("WS connected to /stt");
+          ws.onmessage = (evt) => {
+            const msg = JSON.parse(evt.data);
+            if (msg.is_final) {
+              log("Final: " + msg.transcript);
+            } else {
+              log("Partial: " + msg.transcript);
+            }
           };
-          ws.onclose = () => log("WebSocket closed");
+          ws.onclose = () => log("WS closed");
           ws.onerror = (err) => log("WS error: " + err);
 
-          // 4) Send each recorded chunk to the server
           mediaRecorder.ondataavailable = (e) => {
             if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-              // e.data is a Blob of audio in opus format
-              e.data.arrayBuffer().then((buffer) => {
-                ws.send(buffer);
+              e.data.arrayBuffer().then((buff) => {
+                ws.send(buff);
               });
             }
           };
 
-          // Start recording in small chunk times
-          mediaRecorder.start(250); // send chunk ~every 250ms
-          log("Started recording & sending audio...");
+          mediaRecorder.start(300); // chunk every 300ms
+          log("Recording started...");
         } catch (err) {
-          log("Error starting: " + err);
+          log("Error: " + err);
         }
       };
 
       document.getElementById('stopBtn').onclick = () => {
         if (mediaRecorder && mediaRecorder.state !== "inactive") {
           mediaRecorder.stop();
-          log("Stopped mediaRecorder");
+          log("Recording stopped.");
         }
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.close();
-          log("Closed WS");
+          log("WebSocket closed.");
         }
       };
     </script>
