@@ -6,14 +6,18 @@ import express from 'express';
 import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
+import axios from 'axios';
 import { Configuration, OpenAIApi } from 'openai';
 
-// 1) Load API keys + config from env
+// Load API keys from .env
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY || '';
+const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || '';
+
 const PORT = Number(process.env.PORT || 3000);
 
-// Basic config for OpenAI
+// OpenAI setup
 const openaiConfig = new Configuration({ apiKey: OPENAI_API_KEY });
 const openaiClient = new OpenAIApi(openaiConfig);
 
@@ -26,45 +30,32 @@ const wss = new WebSocketServer({ server, path: '/stt' });
 wss.on('connection', (clientWs) => {
   console.log('Client connected to /stt');
 
-  // Connect to Deepgram STT
-  const dgUrl = 'wss://api.deepgram.com/v1/listen?punctuate=true';
+  // Replaces ?punctuate=true with the following:
+  const dgUrl = "wss://api.deepgram.com/v1/listen?punctuate=true&endpointing=false";
+
   const dgSocket = new WebSocket(dgUrl, {
     headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
   });
 
-  dgSocket.on('open', () => {
-    console.log('Deepgram websocket opened.');
-  });
+  dgSocket.on('open', () => console.log('Deepgram websocket opened.'));
+  dgSocket.on('error', (err) => console.error('Deepgram WS error:', err));
+  dgSocket.on('close', () => console.log('Deepgram WS closed.'));
 
-  dgSocket.on('error', (err) => {
-    console.error('Deepgram WS error:', err);
-  });
-
-  dgSocket.on('close', () => {
-    console.log('Deepgram WS closed.');
-  });
-
-  // Forward partial + final transcripts from deepgram => browser => LLM
-  dgSocket.on('message', async (rawData) => {
+  // Receiving partial + final transcripts from Deepgram
+  dgSocket.on('message', async (raw) => {
     try {
-      const msg = JSON.parse(rawData.toString());
-      // top-level 'is_final' property indicates final or partial
-      const isFinal = msg.is_final || false;
-
+      const msg = JSON.parse(raw.toString());
       const alt = msg.channel?.alternatives?.[0];
-      if (!alt?.transcript) return;
+      if (!alt) return;
+      if (!alt.transcript) return;
 
+      const isFinal = msg.is_final || false;
       const transcript = alt.transcript;
 
-      // Send partial/final transcript to browser
-      clientWs.send(
-        JSON.stringify({
-          transcript,
-          is_final: isFinal,
-        })
-      );
+      // 1) Send partial/final transcript to browser
+      clientWs.send(JSON.stringify({ transcript, is_final: isFinal }));
 
-      // If final transcript, call openAI
+      // 2) If final transcript => call LLM => TTS => send
       if (isFinal && transcript.trim() !== '') {
         await onFinalTranscript(transcript, clientWs);
       }
@@ -73,7 +64,7 @@ wss.on('connection', (clientWs) => {
     }
   });
 
-  // Data from browser => send to deepgram
+  // Data from browser => forward to deepgram
   clientWs.on('message', (chunk) => {
     if (dgSocket.readyState === WebSocket.OPEN) {
       dgSocket.send(chunk);
@@ -81,16 +72,15 @@ wss.on('connection', (clientWs) => {
   });
 
   clientWs.on('close', () => {
-    if (dgSocket.readyState === WebSocket.OPEN) {
-      dgSocket.close();
-    }
+    if (dgSocket.readyState === WebSocket.OPEN) dgSocket.close();
   });
 });
 
-// Minimal “LLM agent” once we get final text
+// Final transcript => LLM => TTS => back to user
 async function onFinalTranscript(text: string, clientWs: WebSocket) {
   console.log("Final transcript =>", text);
 
+  // 1) Call OpenAI
   let llmText = "";
   try {
     const chatRes = await openaiClient.createChatCompletion({
@@ -98,24 +88,18 @@ async function onFinalTranscript(text: string, clientWs: WebSocket) {
       messages: [
         {
           role: "system",
-          content: `
-You are a helpful home assistant. 
-You can chat about anything. 
-If user wants to control lights, you'd do a function call, otherwise just reply with text.
-        `,
+          content: `You are a helpful home assistant. Provide short, concise answers.`,
         },
         { role: "user", content: text },
       ],
       temperature: 0.2,
     });
 
-    // Parse response
-    const choices = chatRes.data.choices || [];
-    if (choices.length === 0 || !choices[0].message) {
-      llmText = "No response from LLM.";
+    const choices = chatRes.data.choices;
+    if (choices && choices[0]?.message?.content) {
+      llmText = choices[0].message.content.trim();
     } else {
-      const content = choices[0].message.content || "";
-      llmText = content.trim() || "LLM gave an empty response.";
+      llmText = "No response from LLM.";
     }
   } catch (err) {
     console.error("OpenAI error:", err);
@@ -124,8 +108,44 @@ If user wants to control lights, you'd do a function call, otherwise just reply 
 
   console.log("LLM text:", llmText);
 
-  // Send LLM text back to client
+  // 2) Send LLM text in JSON form so user can see
   clientWs.send(JSON.stringify({ llmResponse: llmText }));
+
+  // 3) Convert LLM text to speech with ElevenLabs
+  try {
+    const ttsAudio = await generateTTSWithElevenLabs(llmText);
+    // If successful, send MP3 buffer to client
+    if (ttsAudio) {
+      // We can just send raw binary. The client needs to interpret as MP3 arraybuffer
+      clientWs.send(ttsAudio);
+    }
+  } catch (err) {
+    console.error("ElevenLabs TTS error:", err);
+  }
+}
+
+/** 
+ * Calls ElevenLabs TTS to convert text -> MP3 (Buffer).
+ */
+async function generateTTSWithElevenLabs(text: string): Promise<Buffer | null> {
+  if (!text.trim()) return null;
+  try {
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}`;
+    const resp = await axios.post(url,
+      { text },
+      {
+        headers: {
+          'xi-api-key': ELEVEN_API_KEY,
+          'Content-Type': 'application/json',
+        },
+        responseType: 'arraybuffer' // we want the raw MP3 data
+      }
+    );
+    return Buffer.from(resp.data);
+  } catch (err) {
+    console.error("generateTTSWithElevenLabs error:", err);
+    return null;
+  }
 }
 
 // Start server

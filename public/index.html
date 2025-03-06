@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8"/>
-  <title>Deepgram + OpenAI LLM Demo</title>
+  <title>Deepgram => LLM => ElevenLabs TTS</title>
 </head>
 <body>
   <button id="startBtn">Start</button>
@@ -16,51 +16,61 @@
 
   <script>
     let mediaRecorder, ws;
+
     const transcriptBox = document.getElementById("transcriptLog");
     const agentBox = document.getElementById("agentOutput");
 
-    function appendTranscript(text) {
-      transcriptBox.value += text + "\n";
+    function appendTranscript(line) {
+      transcriptBox.value += line + "\n";
     }
-    function appendLLMResponse(text) {
-      agentBox.value += text + "\n";
+    function appendLLMResponse(line) {
+      agentBox.value += line + "\n";
     }
 
-    document.getElementById("startBtn").onclick = async () => {
+    document.getElementById('startBtn').onclick = async () => {
       try {
-        // 1) request mic
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        // 2) create mediaRecorder
         mediaRecorder = new MediaRecorder(stream);
 
-        // 3) connect to /stt
+        // Setup WS
         ws = new WebSocket(`ws://${window.location.host}/stt`);
-        ws.onopen = () => appendTranscript("WS connected /stt");
-        ws.onclose = () => appendTranscript("WS closed");
+        // we expect binary data (MP3) as well => set
+        ws.binaryType = 'arraybuffer';
 
-        // 4) handle incoming transcripts or LLM
-        ws.onmessage = (evt) => {
-          try {
-            const msg = JSON.parse(evt.data);
-            // partial / final transcript
-            if (msg.transcript) {
-              if (msg.is_final) {
-                appendTranscript("[Final] " + msg.transcript);
-              } else {
-                appendTranscript("[Partial] " + msg.transcript);
+        ws.onopen = () => {
+          appendTranscript("WS connected /stt");
+        };
+        ws.onclose = () => {
+          appendTranscript("WS closed");
+        };
+
+        // Receiving partial transcripts, final transcripts, or TTS audio
+        ws.onmessage = async (evt) => {
+          if (typeof evt.data === "string") {
+            // Probably JSON
+            try {
+              const msg = JSON.parse(evt.data);
+              if (msg.transcript) {
+                if (msg.is_final) {
+                  appendTranscript("[Final] " + msg.transcript);
+                } else {
+                  appendTranscript("[Partial] " + msg.transcript);
+                }
               }
+              if (msg.llmResponse) {
+                appendLLMResponse("LLM says: " + msg.llmResponse);
+              }
+            } catch (err) {
+              console.log("Got text that's not JSON:", evt.data);
             }
-            // llmResponse
-            if (msg.llmResponse) {
-              appendLLMResponse("LLM says: " + msg.llmResponse);
-            }
-          } catch (err) {
-            // if we get binary data or invalid JSON
-            console.log("Got unparseable data from server:", evt.data);
+          } else if (evt.data instanceof ArrayBuffer) {
+            // We likely got MP3 audio from ElevenLabs
+            console.log("Received TTS audio chunk (MP3):", evt.data.byteLength, "bytes");
+            await playMp3(evt.data);
           }
         };
 
-        // 5) send mic chunks to server
+        // chunk mic data every 300ms
         mediaRecorder.ondataavailable = (e) => {
           if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
             e.data.arrayBuffer().then((buff) => {
@@ -69,7 +79,6 @@
           }
         };
 
-        // chunk every 300ms
         mediaRecorder.start(300);
         appendTranscript("Recording started...");
       } catch (err) {
@@ -77,7 +86,7 @@
       }
     };
 
-    document.getElementById("stopBtn").onclick = () => {
+    document.getElementById('stopBtn').onclick = () => {
       if (mediaRecorder && mediaRecorder.state !== "inactive") {
         mediaRecorder.stop();
         appendTranscript("Recording stopped.");
@@ -86,6 +95,20 @@
         ws.close();
       }
     };
+
+    async function playMp3(arrayBuff) {
+      try {
+        const audioCtx = new AudioContext();
+        // decode mp3 from arrayBuffer
+        const audioData = await audioCtx.decodeAudioData(arrayBuff);
+        const source = audioCtx.createBufferSource();
+        source.buffer = audioData;
+        source.connect(audioCtx.destination);
+        source.start();
+      } catch (err) {
+        console.error("Error decoding MP3 arrayBuffer:", err);
+      }
+    }
   </script>
 </body>
 </html>
