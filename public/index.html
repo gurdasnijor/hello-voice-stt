@@ -2,52 +2,61 @@
 <html>
 <head>
   <meta charset="utf-8"/>
-  <title>Deepgram => LLM => ElevenLabs TTS</title>
+  <title>Streaming TTS Demo</title>
 </head>
 <body>
-  <button id="startBtn">Start</button>
-  <button id="stopBtn">Stop</button>
+  <button id="startBtn">Start WS Connection</button>
+  <button id="stopBtn">Stop WS Connection</button>
 
   <h3>Transcripts (Partial / Final):</h3>
-  <textarea id="transcriptLog" rows="10" cols="50" readonly></textarea>
-
-  <h3>LLM Responses:</h3>
-  <textarea id="agentOutput" rows="10" cols="50" readonly></textarea>
+  <textarea id="transcriptLog" rows="10" cols="60" readonly></textarea>
 
   <script>
-    let mediaRecorder, ws;
-
+    let ws;
+    let mediaRecorder;
+    let mediaSource;
+    let sourceBuffer;
+    let audio;
+    const chunkQueue = [];
+    
     const transcriptBox = document.getElementById("transcriptLog");
-    const agentBox = document.getElementById("agentOutput");
 
     function appendTranscript(line) {
       transcriptBox.value += line + "\n";
     }
-    function appendLLMResponse(line) {
-      agentBox.value += line + "\n";
-    }
 
     document.getElementById('startBtn').onclick = async () => {
       try {
+        // 1) Get user mic
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         mediaRecorder = new MediaRecorder(stream);
 
-        // Setup WS
+        // 2) Connect WebSocket to server
         ws = new WebSocket(`ws://${window.location.host}/stt`);
-        // we expect binary data (MP3) as well => set
         ws.binaryType = 'arraybuffer';
 
         ws.onopen = () => {
-          appendTranscript("WS connected /stt");
+          appendTranscript("[Browser] WS connected /stt");
         };
         ws.onclose = () => {
-          appendTranscript("WS closed");
+          appendTranscript("[Browser] WS closed");
+        };
+        ws.onerror = (err) => {
+          console.error("[Browser] WS error:", err);
         };
 
-        // Receiving partial transcripts, final transcripts, or TTS audio
-        ws.onmessage = async (evt) => {
-          if (typeof evt.data === "string") {
-            // Probably JSON
+        // 3) Setup MSE for streaming MP3 playback
+        mediaSource = new MediaSource();
+        audio = new Audio();
+        audio.src = URL.createObjectURL(mediaSource);
+
+        // The MediaSource is "closed" by default, wait for it to open
+        mediaSource.addEventListener('sourceopen', onMediaSourceOpen);
+
+        // 4) On receiving a message from server
+        ws.onmessage = (evt) => {
+          if (typeof evt.data === 'string') {
+            // JSON => partial/final transcript
             try {
               const msg = JSON.parse(evt.data);
               if (msg.transcript) {
@@ -57,20 +66,18 @@
                   appendTranscript("[Partial] " + msg.transcript);
                 }
               }
-              if (msg.llmResponse) {
-                appendLLMResponse("LLM says: " + msg.llmResponse);
-              }
             } catch (err) {
-              console.log("Got text that's not JSON:", evt.data);
+              console.log("[Browser] Non-JSON text:", evt.data);
             }
           } else if (evt.data instanceof ArrayBuffer) {
-            // We likely got MP3 audio from ElevenLabs
-            console.log("Received TTS audio chunk (MP3):", evt.data.byteLength, "bytes");
-            await playMp3(evt.data);
+            // We got a chunk of TTS MP3 data
+            const chunk = new Uint8Array(evt.data);
+            chunkQueue.push(chunk);
+            appendNextChunk();
           }
         };
 
-        // chunk mic data every 300ms
+        // 5) Record mic audio in 300ms chunks => send to server
         mediaRecorder.ondataavailable = (e) => {
           if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
             e.data.arrayBuffer().then((buff) => {
@@ -80,35 +87,40 @@
         };
 
         mediaRecorder.start(300);
-        appendTranscript("Recording started...");
+        appendTranscript("[Browser] Recording started...");
       } catch (err) {
-        appendTranscript("Error: " + err);
+        appendTranscript("[Browser] Error: " + err);
       }
     };
+
+    function onMediaSourceOpen() {
+      // Create a SourceBuffer for MP3
+      sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+      sourceBuffer.addEventListener('updateend', appendNextChunk);
+      // Attempt autoplay (some browsers require user interaction first)
+      audio.play().catch(err => console.log("Autoplay blocked:", err));
+    }
+
+    function appendNextChunk() {
+      if (!sourceBuffer || sourceBuffer.updating) return;
+      if (chunkQueue.length > 0) {
+        const nextChunk = chunkQueue.shift();
+        sourceBuffer.appendBuffer(nextChunk);
+      }
+    }
 
     document.getElementById('stopBtn').onclick = () => {
       if (mediaRecorder && mediaRecorder.state !== "inactive") {
         mediaRecorder.stop();
-        appendTranscript("Recording stopped.");
+        appendTranscript("[Browser] Recording stopped.");
       }
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.close();
       }
-    };
-
-    async function playMp3(arrayBuff) {
-      try {
-        const audioCtx = new AudioContext();
-        // decode mp3 from arrayBuffer
-        const audioData = await audioCtx.decodeAudioData(arrayBuff);
-        const source = audioCtx.createBufferSource();
-        source.buffer = audioData;
-        source.connect(audioCtx.destination);
-        source.start();
-      } catch (err) {
-        console.error("Error decoding MP3 arrayBuffer:", err);
+      if (audio) {
+        audio.pause();
       }
-    }
+    };
   </script>
 </body>
 </html>
